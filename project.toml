@@ -1,0 +1,28 @@
+[project]
+name = "lywd03mmc"
+version = "1.0.0"
+authors = [
+    { name = "Jakub Lattenberk", email = "lattenberk.jakub@gmai.com" },
+]
+description = "Client library to connect to lywsd03mmc devices using bleak"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    'bleak ~= 0.21.1',
+    'nest_asyncio~=1.5.8',
+    'setuptools==69.0.3',
+]
+
+[project.urls]
+Homepage = "https://github.com/Lattis/lywsd03mmc-bleak"
+Issues = "https://github.com/Lattis/lywsd03mmc-bleak/issues"
+
+[build-system]
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
