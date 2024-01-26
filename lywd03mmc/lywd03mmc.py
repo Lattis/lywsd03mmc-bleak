@@ -2,82 +2,28 @@ import asyncio
 import logging
 import struct
 import time
-from collections import OrderedDict
-from contextlib import redirect_stdout
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
 from functools import wraps
-from io import StringIO
-from numbers import Number
 
 import nest_asyncio
 from bleak import BleakClient, BleakScanner, BLEDevice, AdvertisementData, BleakGATTCharacteristic
 
+from lywd03mmc.models import SensorData, History, DeviceNotFound
+
 _LOGGER = logging.getLogger(__name__)
 
-UUID_UNITS = 'EBE0CCBE-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 0x00 - F, 0x01 - C    READ WRITE
-UUID_HISTORY = 'EBE0CCBC-7A0A-4B0C-8A1A-6FF2997DA3A6'  # Last idx 152          READ NOTIFY
-UUID_TIME = 'EBE0CCB7-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 5 or 4 bytes          READ WRITE
-UUID_DATA = 'EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 3 bytes               READ NOTIFY
-UUID_BATTERY = 'EBE0CCC4-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 1 byte                READ
-UUID_NUM_RECORDS = 'EBE0CCB9-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 8 bytes               READ
-UUID_RECORD_IDX = 'EBE0CCBA-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 4 bytes               READ WRITE
+_UUID_UNITS = 'EBE0CCBE-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 0x00 - F, 0x01 - C    READ WRITE
+_UUID_HISTORY = 'EBE0CCBC-7A0A-4B0C-8A1A-6FF2997DA3A6'  # Last idx 152          READ NOTIFY
+_UUID_TIME = 'EBE0CCB7-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 5 or 4 bytes          READ WRITE
+_UUID_DATA = 'EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 3 bytes               READ NOTIFY
+_UUID_BATTERY = 'EBE0CCC4-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 1 byte                READ
+_UUID_NUM_RECORDS = 'EBE0CCB9-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 8 bytes               READ
+_UUID_RECORD_IDX = 'EBE0CCBA-7A0A-4B0C-8A1A-6FF2997DA3A6'  # 4 bytes               READ WRITE
+
 nest_asyncio.apply()
 
 
-@dataclass
-class SensorData:
-    temperature: Number
-    humidity: Number
-    battery: Number
-
-
-@dataclass
-class HistoryRecord:
-    time: datetime
-    temp_min: Number
-    temp_max: Number
-    hum_min: Number
-    hum_max: Number
-
-
-@dataclass
-class History:
-    records: OrderedDict = field(default_factory=OrderedDict)
-
-    def __str__(self):
-        with StringIO() as buf, redirect_stdout(buf):
-            for rec in self:
-                print(f"""{rec.time.strftime("%d/%m/%Y, %H:%M:%S")}:
-                        min:        {rec.temp_min}°C 
-                        max:        {rec.temp_max}°C
-                        \u0394:         {(rec.temp_max - rec.temp_min):.1f}°C
-                        hum:        {f"{rec.hum_min}-{rec.hum_max}" if rec.hum_min != rec.hum_max else rec.hum_min}%""")
-            return buf.getvalue()
-
-    def add(self, key: datetime, record: HistoryRecord):
-        self.records[key] = record
-
-    def __iter__(self):
-        for record in self.records.items():
-            yield record[1]
-
-    def values(self) -> [HistoryRecord]:
-        return [self.records[key] for key in self.records]
-
-    def items(self) -> (datetime, HistoryRecord):
-        return [(key, self.records[key]) for key in self.records]
-
-    def iterkeys(self):
-        return iter(self.records)
-
-    def itervalues(self):
-        for k in self.records:
-            yield self.records[k]
-
-
-def async_to_sync(async_func):
+def _async_to_sync(async_func):
     @wraps(async_func)
     def wrapper(*args, **kwargs):
         async def runner():
@@ -93,17 +39,7 @@ def async_to_sync(async_func):
     return wrapper
 
 
-class DeviceNotFound(Exception):
-    pass
-
-
-class TimeRange(Enum):
-    DAY = 24
-    WEEK = 27 * 7
-    MONTH = 31 * 24
-
-
-class Lywsa03Scanner:
+class Lywsd03Scanner:
     devices: {str: BLEDevice}
 
     async def scan(self):
@@ -134,7 +70,7 @@ class Lywsd03Client:
         self._handles = {}
         self._tz_offset = None
         self._device_time: datetime = datetime.now()
-        self._data = SensorData(None, None, None)
+        self._data = SensorData(0, 0, 0)
         self._history_data: History = History()
         self._history_index = None
         self._context_depth = 0
@@ -149,7 +85,7 @@ class Lywsd03Client:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        @async_to_sync
+        @_async_to_sync
         async def disconnect():
             await self._client.disconnect()
             self._connected = False
@@ -162,7 +98,7 @@ class Lywsd03Client:
         return self._connected
 
     def connect(self):
-        @async_to_sync
+        @_async_to_sync
         async def _connect():
             retry = 1
             while not self._connected and retry <= self._connection_retry:
@@ -190,18 +126,18 @@ class Lywsd03Client:
 
     @property
     def data(self):
-        @async_to_sync
+        @_async_to_sync
         async def _get_sensor_data():
-            self._process_sensor_data(None, await self._client.read_gatt_char(UUID_DATA))
+            self._process_sensor_data(None, await self._client.read_gatt_char(_UUID_DATA))
             return self._data
 
         return _get_sensor_data()
 
     @property
     def units(self):
-        @async_to_sync
+        @_async_to_sync
         async def _units():
-            value = await self._client.read_gatt_char(UUID_UNITS)
+            value = await self._client.read_gatt_char(_UUID_UNITS)
             return self.UNITS_CODES[bytes(value)]
 
         return _units()
@@ -209,29 +145,29 @@ class Lywsd03Client:
     @units.setter
     def units(self, value):
 
-        @async_to_sync
+        @_async_to_sync
         async def units_as():
             if value.upper() not in self.UNITS_BYTES.keys():
                 raise ValueError('Units value must be one of %s' % self.UNITS_BYTES.keys())
 
-            await self._client.write_gatt_char(UUID_UNITS, self.UNITS_BYTES[value.upper()])
+            await self._client.write_gatt_char(_UUID_UNITS, self.UNITS_BYTES[value.upper()])
             return value
 
         units_as()
 
     @property
     def battery(self):
-        @async_to_sync
+        @_async_to_sync
         async def _battery_async():
-            return ord(await self._client.read_gatt_char(UUID_BATTERY))
+            return ord(await self._client.read_gatt_char(_UUID_BATTERY))
 
         return _battery_async()
 
     @property
     def time(self):
-        @async_to_sync
+        @_async_to_sync
         async def fn():
-            value = await self._client.read_gatt_char(UUID_TIME)
+            value = await self._client.read_gatt_char(_UUID_TIME)
             if len(value) == 5:
                 ts, self.tz_offset = struct.unpack('Ib', value)
             else:
@@ -244,10 +180,10 @@ class Lywsd03Client:
 
     @time.setter
     def time(self, dt: datetime):
-        @async_to_sync
+        @_async_to_sync
         async def fn():
             data = struct.pack('Ib', int(dt.timestamp()), self.tz_offset)
-            await self._client.write_gatt_char(UUID_TIME, data)
+            await self._client.write_gatt_char(_UUID_TIME, data)
             return dt
 
         fn()
@@ -267,9 +203,9 @@ class Lywsd03Client:
 
     @property
     def history_index(self):
-        @async_to_sync
+        @_async_to_sync
         async def _history_index_async():
-            value = await self._client.read_gatt_char(UUID_RECORD_IDX)
+            value = await self._client.read_gatt_char(_UUID_RECORD_IDX)
             _idx = 0 if len(value) == 0 else struct.unpack_from('I', value)
             return _idx
 
@@ -278,19 +214,19 @@ class Lywsd03Client:
     @history_index.setter
     def history_index(self, value):
 
-        @async_to_sync
+        @_async_to_sync
         async def hist_idx():
             data = struct.pack('I', value)
-            await self._client.write_gatt_char(UUID_RECORD_IDX, data)
+            await self._client.write_gatt_char(_UUID_RECORD_IDX, data)
             return data
 
         hist_idx()
 
     @property
     def stored_entries(self):
-        @async_to_sync
+        @_async_to_sync
         async def _num_stored_entries():
-            value = await self._client.read_gatt_char(UUID_NUM_RECORDS)
+            value = await self._client.read_gatt_char(_UUID_NUM_RECORDS)
 
             self._stored_entries = struct.unpack_from('II', value)
             return self._stored_entries
@@ -300,14 +236,14 @@ class Lywsd03Client:
     @property
     def history_data(self):
 
-        @async_to_sync
+        @_async_to_sync
         async def _get_history_data():
-            await self._client.start_notify(UUID_HISTORY, self._process_history_data)
+            await self._client.start_notify(_UUID_HISTORY, self._process_history_data)
 
             end_date = self._device_time - timedelta(hours=1)
             while not self._latest_record or self._latest_record <= end_date:
                 await asyncio.sleep(1)
-            await self._client.stop_notify(UUID_HISTORY)
+            await self._client.stop_notify(_UUID_HISTORY)
             return True
 
         _get_history_data()
@@ -315,6 +251,8 @@ class Lywsd03Client:
 
     def history(self, time_range: TimeRange = TimeRange.DAY) -> History:
         self.history_index = self.stored_entries[0] - time_range.value
+        if self.stored_entries[1] == 0:
+            return History()
         return self.history_data
 
     def _process_sensor_data(self, _, data: bytearray):
